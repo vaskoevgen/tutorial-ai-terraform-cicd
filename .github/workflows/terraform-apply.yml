@@ -1,0 +1,85 @@
+name: "3. Terraform Apply (Deploy)"
+
+on:
+    push:
+        branches:
+            - main
+            - "feature/**"
+        paths:
+            - "terraform/**"
+
+jobs:
+    # Deployment to Dev Environment (happens automatically when AI updates logic to a feature branch)
+    deploy-dev:
+        if: startsWith(github.ref, 'refs/heads/feature/')
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+            id-token: write
+        defaults:
+            run:
+                working-directory: terraform
+
+        steps:
+            - name: Checkout Code
+              uses: actions/checkout@v4
+
+            - name: Authenticate to Google Cloud
+              uses: google-github-actions/auth@v2
+              with:
+                  workload_identity_provider: "${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
+                  service_account: "${{ secrets.GCP_SERVICE_ACCOUNT }}"
+
+            - name: Setup Terraform
+              uses: hashicorp/setup-terraform@v3
+
+            - name: Terraform Init
+              run: terraform init -backend-config="bucket=${{ secrets.GCP_TF_STATE_BUCKET }}" -backend-config="prefix=terraform/dev-state"
+
+            - name: Select Workspace
+              run: terraform workspace select dev || terraform workspace new dev
+
+            - name: Terraform Apply
+              run: |
+                  terraform apply -auto-approve \
+                    -var="project_id=${{ secrets.GCP_PROJECT_ID }}" \
+                    -var="region=us-central1"
+
+    # Deployment to Production (happens on merge to main, MUST wait for manual approval)
+    deploy-prod:
+        if: github.ref == 'refs/heads/main'
+        runs-on: ubuntu-latest
+        # Binds to a GitHub Environment that requires Manual Approval
+        environment: production
+        permissions:
+            contents: read
+            id-token: write
+        defaults:
+            run:
+                working-directory: terraform
+
+        steps:
+            - name: Checkout Code
+              uses: actions/checkout@v4
+
+            - name: Authenticate to Google Cloud
+              uses: google-github-actions/auth@v2
+              with:
+                  workload_identity_provider: "${{ secrets.GCP_PROD_WORKLOAD_IDENTITY_PROVIDER || secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}"
+                  service_account: "${{ secrets.GCP_PROD_SERVICE_ACCOUNT || secrets.GCP_SERVICE_ACCOUNT }}"
+
+            - name: Setup Terraform
+              uses: hashicorp/setup-terraform@v3
+
+            - name: Terraform Init
+              run: terraform init -backend-config="bucket=${{ secrets.GCP_TF_STATE_BUCKET }}" -backend-config="prefix=terraform/prod-state"
+
+            - name: Select Workspace
+              run: terraform workspace select prod || terraform workspace new prod
+
+            - name: Terraform Apply
+              run: |
+                  # Use prod specific vars here if necessary
+                  terraform apply -auto-approve \
+                    -var="project_id=${{ secrets.GCP_PROD_PROJECT_ID || secrets.GCP_PROJECT_ID }}" \
+                    -var="region=us-central1"

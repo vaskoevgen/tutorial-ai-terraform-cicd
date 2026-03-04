@@ -1,0 +1,95 @@
+name: "1. AI Terraform Prompter"
+
+# This workflow allows developers to trigger Terraform code generation via an Issue Comment or Workflow Dispatch
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      developer_prompt:
+        description: "What should the AI build in Terraform?"
+        required: true
+        type: string
+
+jobs:
+  run-ai:
+    # Only run if triggered manually OR if the issue comment starts with /ai-terraform
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.event.comment.body, '/ai-terraform')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to push new branch and create PR
+      pull-requests: write # Needed to create PR
+      id-token: write # Needed for GCP Workload Identity Federation
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set Prompt Context
+        id: prompt
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "PROMPT=${{ github.event.inputs.developer_prompt }}" >> $GITHUB_ENV
+            echo "BRANCH_NAME=feature/ai-gen-$(date +%s)" >> $GITHUB_ENV
+          else
+            # Extract content after /ai-terraform
+            PROMPT_TEXT=$(echo "${{ github.event.comment.body }}" | sed 's|/ai-terraform ||')
+            echo "PROMPT=$PROMPT_TEXT" >> $GITHUB_ENV
+            echo "BRANCH_NAME=feature/ai-issue-${{ github.event.issue.number }}-$(date +%s)" >> $GITHUB_ENV
+          fi
+
+      # Authenticate to Google Cloud (Replace with your Workforce Identity Provider & Service Account)
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          # Assuming you have set these up in GitHub Settings -> Secrets
+          workload_identity_provider: '${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}'
+          service_account: '${{ secrets.GCP_SERVICE_ACCOUNT }}'
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run AI Terraform Updater
+        env:
+          # The google-github-actions/auth step automatically sets up the credentials environment!
+          # We just need to ensure the GCP Project ID is available if the script needs it explicitly
+          GOOGLE_CLOUD_PROJECT: ${{ secrets.GCP_PROJECT_ID }}
+        run: python scripts/ai_terraform_updater.py "${{ env.PROMPT }}"
+
+      # Check if AI actually changed the file
+      - name: Check for changes
+        id: check_changes
+        run: |
+          if [[ -n $(git status -s terraform/main.tf) ]]; then
+            echo "changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "changed=false" >> $GITHUB_OUTPUT
+          fi
+
+      # Commit and create Pull Request IF changes happened
+      - name: Create Pull Request with AI Changes
+        if: steps.check_changes.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: ${{ env.BRANCH_NAME }}
+          commit-message: "🤖 AI Update: Terraform Changes"
+          title: "🤖 AI Terraform Update"
+          body: |
+            ## AI Generated Terraform Updates
+            The AI has modified the infrastructure code based on the developer prompt.
+
+            **Prompt Input:**
+            > ${{ env.PROMPT }}
+
+            ### Action Required:
+            1. **Code Review**: Review the generated Terraform code carefully.
+            2. **Plan Check**: Wait for the `terraform-plan` workflow to post the Terraform Plan in the comments.
+            3. **Merge**: Once satisfied, merge this PR to trigger the deployment.
+          labels: "ai-generated, terraform"
